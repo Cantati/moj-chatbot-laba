@@ -1,7 +1,14 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+
+type AnalysisResult = {
+  category: "sales" | "support" | "billing" | "unknown";
+  priority: "normal" | "high";
+  draft: string;
+  needs_review: boolean;
+};
 
 export default function Home() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -10,6 +17,11 @@ export default function Home() {
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
   const [input, setInput] = useState("");
+  const [mode, setMode] = useState<"chat" | "analysis">("chat");
+  const [analysisPending, setAnalysisPending] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const analysisController = useRef<AbortController | null>(null);
   const { messages, sendMessage, status, error, clearError, setMessages, stop } = useChat();
   const isWaiting = status === "submitted" || status === "streaming";
 
@@ -57,6 +69,7 @@ export default function Home() {
 
   async function handleLogout() {
     stop();
+    analysisController.current?.abort();
     try {
       const response = await fetch("/api/auth/logout", { method: "POST" });
       if (!response.ok) throw new Error("logout failed");
@@ -79,6 +92,45 @@ export default function Home() {
     clearError();
     setInput("");
     void sendMessage({ text });
+  }
+
+  async function handleAnalysisSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = input.trim();
+    if (!message || analysisPending) return;
+
+    const controller = new AbortController();
+    analysisController.current = controller;
+    setAnalysisPending(true);
+    setAnalysisResult(null);
+    setAnalysisError("");
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+        signal: controller.signal,
+      });
+      const data = (await response.json()) as AnalysisResult & { error?: string };
+      if (!response.ok) {
+        setAnalysisError(data.error ?? "Nie udało się przeanalizować wiadomości.");
+        return;
+      }
+      setAnalysisResult(data);
+    } catch (requestError) {
+      setAnalysisError(
+        requestError instanceof Error && requestError.name === "AbortError"
+          ? "Analiza została przerwana. Nie utworzono wyniku."
+          : "Nie udało się połączyć z serwerem. Nie utworzono wyniku.",
+      );
+    } finally {
+      if (analysisController.current === controller) analysisController.current = null;
+      setAnalysisPending(false);
+    }
+  }
+
+  function cancelAnalysis() {
+    analysisController.current?.abort();
   }
 
   return (
@@ -113,6 +165,26 @@ export default function Home() {
             <button className="logout-button" type="button" onClick={handleLogout}>Wyjdź</button>
           </header>
           {authError && <p className="error" role="alert">{authError}</p>}
+          <nav className="mode-switch" aria-label="Tryb pracy">
+            <button
+              className={mode === "chat" ? "mode-button active" : "mode-button"}
+              type="button"
+              onClick={() => setMode("chat")}
+              disabled={isWaiting || analysisPending}
+            >
+              Zwykły czat
+            </button>
+            <button
+              className={mode === "analysis" ? "mode-button active" : "mode-button"}
+              type="button"
+              onClick={() => setMode("analysis")}
+              disabled={isWaiting || analysisPending}
+            >
+              Analiza Studio Nova
+            </button>
+          </nav>
+          {mode === "chat" ? (
+            <>
           <section className="conversation" aria-label="Rozmowa" aria-live="polite">
             {messages.map((message) => (
               <article className={`message ${message.role}`} key={message.id}>
@@ -146,6 +218,50 @@ export default function Home() {
               {isWaiting ? "Czekaj…" : "Wyślij"}
             </button>
           </form>
+            </>
+          ) : (
+            <section className="analysis-panel" aria-label="Analiza wiadomości Studio Nova">
+              <p>Wynik pozostaje szkicem. Wiadomości nie są wysyłane.</p>
+              <form className="analysis-form" onSubmit={handleAnalysisSubmit}>
+                <label htmlFor="analysis-message">Wiadomość klienta</label>
+                <textarea
+                  id="analysis-message"
+                  name="analysis-message"
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="Wklej wiadomość do analizy…"
+                  maxLength={12000}
+                  disabled={analysisPending}
+                />
+                <div className="analysis-actions">
+                  <button type="submit" disabled={!input.trim() || analysisPending || isWaiting}>
+                    {analysisPending ? "Analizuję…" : "Analizuj wiadomość"}
+                  </button>
+                  {analysisPending && (
+                    <button className="cancel-button" type="button" onClick={cancelAnalysis}>
+                      Przerwij
+                    </button>
+                  )}
+                </div>
+              </form>
+              {analysisError && <p className="error" role="alert">{analysisError}</p>}
+              {analysisPending && <p className="status" role="status">Trwa analiza…</p>}
+              {analysisResult && (
+                <article className="analysis-result" aria-live="polite">
+                  <h2>Wynik analizy</h2>
+                  <dl>
+                    <div><dt>Kategoria</dt><dd>{analysisResult.category}</dd></div>
+                    <div><dt>Priorytet</dt><dd>{analysisResult.priority === "high" ? "Wysoki" : "Normalny"}</dd></div>
+                    <div><dt>Szkic odpowiedzi</dt><dd className="analysis-draft">{analysisResult.draft}</dd></div>
+                    <div>
+                      <dt>Status sprawdzenia</dt>
+                      <dd>{analysisResult.needs_review ? "Wymaga sprawdzenia przez pracownika" : "Nie wymaga sprawdzenia według analizy"}</dd>
+                    </div>
+                  </dl>
+                </article>
+              )}
+            </section>
+          )}
         </>
       )}
     </main>

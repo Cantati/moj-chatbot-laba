@@ -24,6 +24,9 @@ h1 { margin: 0 0 22px; font-size: 26px; }
 .chat-header h1 { margin-bottom: 22px; }
 .auth-form { display: flex; gap: 10px; }
 .logout-button { padding: 9px 14px; margin-bottom: 22px; background: #596579; }
+.mode-switch { display: flex; gap: 8px; margin-bottom: 16px; }
+.mode-button { min-height: 38px; padding: 8px 12px; background: #e8ecf5; color: #293650; }
+.mode-button.active { background: #3157d5; color: white; }
 
 .conversation {
   min-height: 280px;
@@ -36,6 +39,19 @@ h1 { margin: 0 0 22px; font-size: 26px; }
 }
 
 .message-form { display: flex; gap: 10px; }
+.analysis-panel > p:first-child { margin: 0 0 14px; color: #58647a; }
+.analysis-form { display: grid; gap: 8px; }
+.analysis-form label { font-weight: 600; }
+.analysis-form textarea { min-height: 130px; padding: 12px 14px; border: 1px solid #cbd3e1; border-radius: 8px; font: inherit; resize: vertical; }
+.analysis-actions { display: flex; gap: 8px; }
+.analysis-actions button { min-height: 42px; }
+.cancel-button { background: #596579; }
+.analysis-result { margin-top: 20px; padding: 16px; border: 1px solid #e1e6ef; border-radius: 10px; background: #fbfcfe; }
+.analysis-result h2 { margin: 0 0 12px; font-size: 19px; }
+.analysis-result dl { display: grid; gap: 12px; margin: 0; }
+.analysis-result dt { font-size: 13px; font-weight: 700; color: #58647a; }
+.analysis-result dd { margin: 3px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.analysis-draft { white-space: pre-wrap; }
 
 .message { margin: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .message strong { display: block; margin-bottom: 4px; font-size: 13px; color: #58647a; }

@@ -1,6 +1,7 @@
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { validSessionFromCookieHeader } from "../../../lib/auth";
+import { STUDIO_NOVA_CHAT_INSTRUCTIONS } from "../../../lib/studio-nova";
 
 export async function POST(request: Request) {
   if (!validSessionFromCookieHeader(request.headers.get("cookie"))) {
@@ -29,6 +30,7 @@ export async function POST(request: Request) {
     const openrouter = createOpenRouter({ apiKey });
     const result = streamText({
       model: openrouter(modelId),
+      instructions: STUDIO_NOVA_CHAT_INSTRUCTIONS,
       messages: await convertToModelMessages(body.messages),
     });
 
