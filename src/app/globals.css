@@ -38,7 +38,18 @@ h1 { margin: 0 0 22px; font-size: 26px; }
   background: #fbfcfe;
 }
 
-.message-form { display: flex; gap: 10px; }
+.message-form { display: flex; flex-wrap: wrap; gap: 10px; }
+.message-form input[type="text"] { flex: 1 1 220px; }
+.image-action-button, .remove-image-button { padding: 0 12px; background: #596579; font-size: 14px; }
+.image-prompt-hint { margin: 6px 0 0; color: #58647a; font-size: 12px; }
+.selected-image-preview { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; padding: 8px; border: 1px solid #e1e6ef; border-radius: 8px; }
+.selected-image-preview img { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; }
+.selected-image-preview span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remove-image-button { min-height: 34px; }
+.message-content { display: grid; justify-items: start; gap: 8px; }
+.message.user .message-content { justify-items: end; }
+.chat-image { display: block; max-width: min(100%, 420px); max-height: 360px; border: 1px solid #e1e6ef; border-radius: 10px; object-fit: contain; }
+.image-model-id { display: block; margin-top: 6px; color: #58647a; font-size: 11px; }
 .analysis-panel > p:first-child { margin: 0 0 14px; color: #58647a; }
 .analysis-form { display: grid; gap: 8px; }
 .analysis-form label { font-weight: 600; }
@@ -57,6 +68,13 @@ h1 { margin: 0 0 22px; font-size: 26px; }
 .message strong { display: block; margin-bottom: 4px; font-size: 13px; color: #58647a; }
 .message.user { text-align: right; }
 .message span { white-space: pre-wrap; }
+.tool-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 7px; }
+.tool-badge { padding: 2px 7px; border-radius: 999px; background: #edf1fa; color: #42516d; font-size: 11px; line-height: 1.5; }
+.message-sources { margin-top: 10px; padding-top: 8px; border-top: 1px solid #e1e6ef; }
+.message-sources strong { margin-bottom: 4px; }
+.message-sources ul { margin: 0 0 4px; padding-left: 20px; }
+.message-sources a { color: #3157d5; text-decoration: underline; }
+.message-sources small { color: #58647a; }
 .status { margin: 14px; color: #58647a; font-style: italic; }
 .error { margin: 14px; color: #a32626; }
 

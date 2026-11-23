@@ -1,7 +1,49 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { DefaultChatTransport, type FileUIPart, type UIDataTypes, type UIMessage } from "ai";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { getToolOutputErrorMessage } from "../lib/agent-tool-errors";
+
+type GeneratedImage = { image: string; mediaType: string; modelId: string };
+type StudioNovaPrice = { usluga: string; czasTrwania: string; cena: string };
+type ConsultationPreparation = { charakter: string; wskazowki: string[] };
+type ChatTools = {
+  generateImage: { input: { prompt: string }; output: GeneratedImage };
+  cennikUslug: { input: { usluga: "konsultacja online" }; output: StudioNovaPrice };
+  przygotowanieDoUslugi: {
+    input: {};
+    output: ConsultationPreparation;
+  };
+};
+type ChatMessage = UIMessage<{ retrievedAt?: string; modelId?: string }, UIDataTypes, ChatTools>;
+const chatTransport = new DefaultChatTransport<ChatMessage>({
+  api: "/api/agent",
+  body: { mode: "chat" },
+});
+
+function getToolNameFromErrorPart(part: unknown): string | null {
+  if (!part || typeof part !== "object") return null;
+  const value = part as { type?: unknown; state?: unknown; toolName?: unknown };
+  if (value.state !== "output-error") return null;
+  if (value.type === "dynamic-tool") return typeof value.toolName === "string" ? value.toolName : "narzędzie";
+  return typeof value.type === "string" && value.type.startsWith("tool-") ? value.type.slice(5) : null;
+}
+
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("Nie udało się odczytać zdjęcia."));
+    };
+    reader.onerror = () => reject(new Error("Nie udało się odczytać zdjęcia."));
+    reader.readAsDataURL(file);
+  });
+}
 
 type AnalysisResult = {
   category: "sales" | "support" | "billing" | "unknown";
@@ -17,12 +59,19 @@ export default function Home() {
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
   const [input, setInput] = useState("");
+  const [selectedImage, setSelectedImage] = useState<FileUIPart | null>(null);
+  const [imageError, setImageError] = useState("");
+  const [imageGenerationPending, setImageGenerationPending] = useState(false);
+  const [imageGenerationError, setImageGenerationError] = useState("");
   const [mode, setMode] = useState<"chat" | "analysis">("chat");
   const [analysisPending, setAnalysisPending] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [analysisError, setAnalysisError] = useState("");
   const analysisController = useRef<AbortController | null>(null);
-  const { messages, sendMessage, status, error, clearError, setMessages, stop } = useChat();
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const { messages, sendMessage, status, error, clearError, setMessages, stop } = useChat<ChatMessage>({
+    transport: chatTransport,
+  });
   const isWaiting = status === "submitted" || status === "streaming";
 
   useEffect(() => {
@@ -87,11 +136,61 @@ export default function Home() {
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || isWaiting) return;
+    if ((!text && !selectedImage) || isWaiting || imageGenerationPending) return;
 
     clearError();
+    setImageError("");
     setInput("");
-    void sendMessage({ text });
+    const image = selectedImage;
+    setSelectedImage(null);
+    if (image) {
+      void (text ? sendMessage({ text, files: [image] }) : sendMessage({ files: [image] }));
+    } else {
+      void sendMessage({ text });
+    }
+  }
+
+  async function handleImageSelection(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      setImageError("Wybierz zdjęcie w formacie JPG, PNG lub WebP.");
+      return;
+    }
+    if (file.size > MAX_IMAGE_SIZE) {
+      setImageError("Zdjęcie może mieć maksymalnie 4 MB.");
+      return;
+    }
+
+    setImageError("");
+    try {
+      setSelectedImage({
+        type: "file",
+        mediaType: file.type,
+        filename: file.name,
+        url: await readFileAsDataUrl(file),
+      });
+    } catch {
+      setImageError("Nie udało się wczytać zdjęcia. Spróbuj ponownie.");
+    }
+  }
+
+  async function handleImageGeneration() {
+    const prompt = input.trim();
+    if (!prompt || prompt.length > 500 || isWaiting || imageGenerationPending) return;
+
+    setImageGenerationPending(true);
+    setImageGenerationError("");
+    try {
+      await sendMessage({ text: `Wygeneruj obraz na podstawie opisu: ${prompt}` });
+      setInput("");
+    } catch {
+      setImageGenerationError("Nie udało się wygenerować obrazu. Spróbuj ponownie.");
+    } finally {
+      setImageGenerationPending(false);
+    }
   }
 
   async function handleAnalysisSubmit(event: FormEvent<HTMLFormElement>) {
@@ -105,10 +204,10 @@ export default function Home() {
     setAnalysisResult(null);
     setAnalysisError("");
     try {
-      const response = await fetch("/api/analyze", {
+      const response = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ mode: "analyze", message }),
         signal: controller.signal,
       });
       const data = (await response.json()) as AnalysisResult & { error?: string };
@@ -186,16 +285,119 @@ export default function Home() {
           {mode === "chat" ? (
             <>
           <section className="conversation" aria-label="Rozmowa" aria-live="polite">
-            {messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                <strong>{message.role === "user" ? "Ty" : "Chatbot"}</strong>
-                <div>
-                  {message.parts.map((part, index) =>
-                    part.type === "text" ? <span key={index}>{part.text}</span> : null,
+            {messages.map((message, messageIndex) => {
+              const previousMessage = messages[messageIndex - 1];
+              const answersImage =
+                message.role === "assistant" &&
+                previousMessage?.role === "user" &&
+                previousMessage.parts.some(
+                  (part) => part.type === "file" && part.mediaType.startsWith("image/"),
+                );
+              const containsImage =
+                message.role === "assistant" &&
+                message.parts.some((part) => part.type === "file" && part.mediaType.startsWith("image/"));
+              const modelId =
+                message.role === "assistant" && (answersImage || containsImage)
+                  ? message.metadata?.modelId
+                  : undefined;
+              const sources =
+                message.role === "assistant"
+                  ? message.parts.filter((part) => part.type === "source-url")
+                  : [];
+              const toolNames =
+                message.role === "assistant"
+                  ? message.parts.flatMap((part) => {
+                      if (part.type === "dynamic-tool") return [part.toolName];
+                      return part.type.startsWith("tool-") ? [part.type.slice(5)] : [];
+                    })
+                  : [];
+              if (sources.length > 0) toolNames.push("web_search");
+              const usedTools = Array.from(new Set(toolNames));
+
+              return (
+                <article className={`message ${message.role}`} key={message.id}>
+                  <strong>{message.role === "user" ? "Ty" : "Chatbot"}</strong>
+                  {usedTools.length > 0 && (
+                    <div className="tool-badges" aria-label="Użyte narzędzia">
+                      {usedTools.map((name) => (
+                        <span className="tool-badge" key={name}>
+                          {name === "web_search"
+                            ? "🔎 wyszukiwanie"
+                            : name === "aktualnyCzas"
+                              ? "🕒 aktualnyCzas"
+                              : name === "cennikUslug"
+                                ? "cennikUsług"
+                                : name === "przygotowanieDoUslugi"
+                                  ? "przygotowanieDoUsługi"
+                              : name}
+                        </span>
+                      ))}
+                    </div>
                   )}
-                </div>
-              </article>
-            ))}
+                  <div className="message-content">
+                    {message.parts.map((part, index) => {
+                      const toolErrorName = getToolNameFromErrorPart(part);
+                      if (toolErrorName) {
+                        return (
+                          <p className="error" role="alert" key={index}>
+                            {getToolOutputErrorMessage(toolErrorName)}
+                          </p>
+                        );
+                      }
+                      if (part.type === "text") return <span key={index}>{part.text}</span>;
+                      if (part.type === "file" && part.mediaType.startsWith("image/")) {
+                        return (
+                          <img
+                            className="chat-image"
+                            key={index}
+                            src={part.url}
+                            alt={part.filename || "Zdjęcie w rozmowie"}
+                            loading="lazy"
+                          />
+                        );
+                      }
+                      if (part.type === "tool-generateImage" && part.state === "output-available") {
+                        return (
+                          <span className="generated-image-result" key={index}>
+                            <img
+                              className="chat-image"
+                              src={`data:${part.output.mediaType};base64,${part.output.image}`}
+                              alt="Obraz wygenerowany na podstawie opisu"
+                              loading="lazy"
+                            />
+                            <small className="image-model-id">Model: {part.output.modelId}</small>
+                          </span>
+                        );
+                      }
+                      return null;
+                    })}
+                  </div>
+                  {modelId && <small className="image-model-id">Model: {modelId}</small>}
+                  {sources.length > 0 && (
+                    <section className="message-sources" aria-label="Źródła odpowiedzi">
+                      <strong>Źródła</strong>
+                      <ul>
+                        {sources.map((source, index) => (
+                          <li key={`${source.sourceId}-${index}`}>
+                            <a href={source.url} target="_blank" rel="noreferrer">
+                              {source.title || source.url}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                      <small>
+                        pobrano: {message.metadata?.retrievedAt
+                          ? new Date(message.metadata.retrievedAt).toLocaleString("pl-PL", {
+                              dateStyle: "short",
+                              timeStyle: "short",
+                            })
+                          : "—"}
+                      </small>
+                    </section>
+                  )}
+                </article>
+              );
+            })}
             {isWaiting && <p className="status" role="status">Chatbot pisze…</p>}
             {error && (
               <p className="error" role="alert">
@@ -203,6 +405,17 @@ export default function Home() {
               </p>
             )}
           </section>
+          {selectedImage && (
+            <div className="selected-image-preview">
+              <img src={selectedImage.url} alt="Podgląd wybranego zdjęcia" />
+              <span>{selectedImage.filename}</span>
+              <button type="button" className="remove-image-button" onClick={() => setSelectedImage(null)}>
+                Usuń zdjęcie
+              </button>
+            </div>
+          )}
+          {imageError && <p className="error" role="alert">{imageError}</p>}
+          {imageGenerationError && <p className="error" role="alert">{imageGenerationError}</p>}
           <form className="message-form" onSubmit={handleSubmit}>
             <label className="sr-only" htmlFor="message">Wiadomość</label>
             <input
@@ -212,12 +425,38 @@ export default function Home() {
               placeholder="Napisz wiadomość…"
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              disabled={isWaiting}
+              disabled={isWaiting || imageGenerationPending}
             />
-            <button type="submit" disabled={!input.trim() || isWaiting}>
+            <input
+              ref={imageInputRef}
+              className="sr-only"
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+              onChange={handleImageSelection}
+              tabIndex={-1}
+              aria-hidden="true"
+            />
+            <button
+              type="button"
+              className="image-action-button"
+              onClick={() => imageInputRef.current?.click()}
+              disabled={isWaiting || imageGenerationPending}
+            >
+              Dodaj zdjęcie
+            </button>
+            <button
+              type="button"
+              className="image-action-button"
+              onClick={() => void handleImageGeneration()}
+              disabled={!input.trim() || input.trim().length > 500 || isWaiting || imageGenerationPending}
+            >
+              {imageGenerationPending ? "Generuję…" : "Wygeneruj obraz"}
+            </button>
+            <button type="submit" disabled={(!input.trim() && !selectedImage) || isWaiting || imageGenerationPending}>
               {isWaiting ? "Czekaj…" : "Wyślij"}
             </button>
           </form>
+          <p className="image-prompt-hint">Opis do generowania obrazu: maksymalnie 500 znaków.</p>
             </>
           ) : (
             <section className="analysis-panel" aria-label="Analiza wiadomości Studio Nova">
@@ -235,7 +474,7 @@ export default function Home() {
                 />
                 <div className="analysis-actions">
                   <button type="submit" disabled={!input.trim() || analysisPending || isWaiting}>
-                    {analysisPending ? "Analizuję…" : "Analizuj wiadomość"}
+                    {analysisPending ? "Analizuję…" : "Analiza JSON"}
                   </button>
                   {analysisPending && (
                     <button className="cancel-button" type="button" onClick={cancelAnalysis}>
