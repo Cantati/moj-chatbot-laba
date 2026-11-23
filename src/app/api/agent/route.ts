@@ -6,6 +6,7 @@ import { createStudioNovaAnalysisErrorResponse } from "../../../lib/studio-nova-
 import { validateChatRequestMessages } from "../../../lib/agent-chat-validation";
 import { cennikUslugInputSchema, pobierzCennikUslug } from "../../../lib/studio-nova-cennik";
 import { przygotowanieDoUslugiTool } from "../../../lib/studio-nova-przygotowanie";
+import { createWorkshopTools } from "../../../lib/workshop-tools";
 import {
   STUDIO_NOVA_ANALYSIS_INSTRUCTIONS,
   STUDIO_NOVA_CHAT_INSTRUCTIONS,
@@ -15,6 +16,53 @@ import {
 } from "../../../lib/studio-nova";
 
 const imagePromptSchema = z.object({ prompt: z.string().trim().min(1).max(500) });
+const MAX_AGENT_STEPS = 6;
+
+function summarizeToolResult(toolName: string, output: unknown) {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return toolName + ": narzędzie zostało wykonane.";
+  }
+  const result = output as Record<string, unknown>;
+  if (typeof result.error === "string") return toolName + ": " + result.error;
+
+  const fieldsByTool: Record<string, string[]> = {
+    pogoda: ["city", "date", "weather", "temperatureMaxC", "temperatureMinC", "precipitationProbabilityMaxPercent"],
+    waluty: ["code", "rateToPLN", "amount", "amountPLN", "rateDate"],
+    swieta: ["countryCode", "year"],
+    wikipedia: ["title", "description", "url"],
+    kalkulator: ["operation", "a", "b", "result"],
+    aktualnyCzas: ["date", "weekday", "time", "timeZone"],
+    cennikUslug: ["usluga", "czasTrwania", "cena"],
+    diagnostyka: ["model", "stepLimit"],
+  };
+  const details = (fieldsByTool[toolName] ?? [])
+    .filter((key) => ["string", "number", "boolean"].includes(typeof result[key]))
+    .map((key) => key + ": " + String(result[key]));
+  if (toolName === "swieta" && Array.isArray(result.holidays)) {
+    const holidays = result.holidays.slice(0, 3).flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const holiday = item as { date?: unknown; name?: unknown };
+      return typeof holiday.date === "string" ? [holiday.date + (typeof holiday.name === "string" ? " " + holiday.name : "")] : [];
+    });
+    details.push("liczba świąt: " + result.holidays.length);
+    if (holidays.length) details.push("przykłady: " + holidays.join(", "));
+  }
+  if (toolName === "wikipedia" && typeof result.summary === "string") {
+    details.push("streszczenie: " + result.summary.slice(0, 300));
+  }
+  if (toolName === "przygotowanieDoUslugi" && Array.isArray(result.wskazowki)) {
+    details.push(...result.wskazowki.filter((item): item is string => typeof item === "string").slice(0, 4));
+  }
+  if (toolName === "notatki") {
+    if (typeof result.message === "string") details.push(result.message);
+    if (Array.isArray(result.notes)) details.push("liczba zapisanych notatek: " + result.notes.length);
+    if (result.note && typeof result.note === "object" && typeof (result.note as { text?: unknown }).text === "string") {
+      details.push("zapisana notatka: " + (result.note as { text: string }).text.slice(0, 200));
+    }
+  }
+  if (toolName === "generateImage") details.push("obraz wygenerowany");
+  return toolName + (details.length ? ": " + details.join(", ") : ": narzędzie zostało wykonane.");
+}
 
 export async function POST(request: Request) {
   if (!validSessionFromCookieHeader(request.headers.get("cookie"))) {
@@ -102,31 +150,46 @@ export async function POST(request: Request) {
 
   try {
     const openrouter = createOpenRouter({ apiKey });
+    const workshopTools = createWorkshopTools({
+      modelId,
+      environment: {
+        openrouterApiKey: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+        openrouterModel: Boolean(process.env.OPENROUTER_MODEL?.trim()),
+        chatPassword: Boolean(process.env.CHAT_PASSWORD?.length),
+        sessionSecret: Boolean(process.env.SESSION_SECRET?.trim() && Buffer.byteLength(process.env.SESSION_SECRET.trim()) >= 32),
+      },
+    });
     let responseModelId: string | undefined;
+    const agentSteps: Array<{ number: number; tools: string[] }> = [];
+    const limitFindings: string[] = [];
+    let limitReached = false;
     const result = streamText({
       model: openrouter(modelId),
-      instructions: `${STUDIO_NOVA_CHAT_INSTRUCTIONS}\n\nJeśli użytkownik wyraźnie prosi o stworzenie, narysowanie lub wygenerowanie obrazu, użyj narzędzia generateImage.`,
+      instructions: [
+        STUDIO_NOVA_CHAT_INSTRUCTIONS,
+        "Przy zadaniu złożonym pracuj krok po kroku: użyj narzędzia, przeczytaj jego wynik i dopiero wtedy zdecyduj o następnym kroku. Nie zgaduj danych, które możesz sprawdzić.",
+        "Jeśli użytkownik wyraźnie prosi o stworzenie, narysowanie lub wygenerowanie obrazu, użyj narzędzia generateImage.",
+      ].join("\n\n"),
       messages: await convertToModelMessages(validatedMessages.messages),
-      onStepFinish: ({ response }) => {
+      onStepFinish: ({ response, stepNumber, toolCalls, toolResults, sources, text, finishReason }) => {
         responseModelId = response.modelId;
+        const calledTools = toolCalls.map((call) => call.toolName);
+        if (sources.length > 0 && !calledTools.includes("web_search")) calledTools.push("web_search");
+        if (calledTools.length > 0) agentSteps.push({ number: stepNumber + 1, tools: calledTools });
+        for (const toolResult of toolResults) {
+          limitFindings.push(summarizeToolResult(toolResult.toolName, toolResult.output));
+        }
+        if (sources.length > 0) {
+          limitFindings.push("wyszukiwanie: znaleziono " + sources.length + " źródeł.");
+        }
+        if (text.trim()) limitFindings.push(text.trim().slice(0, 500));
+        if (stepNumber + 1 >= MAX_AGENT_STEPS && finishReason === "tool-calls") {
+          limitReached = true;
+        }
       },
       tools: {
         web_search: openrouter.tools.webSearch({ maxResults: 3, engine: "native" }),
-        aktualnyCzas: tool({
-          description:
-            "Zwraca aktualną datę, dzień tygodnia i godzinę w strefie Europe/Warsaw. Użyj tego narzędzia, gdy użytkownik pyta o dziś, teraz, jutro, konkretny dzień lub datę względną, na przykład: „za ile dni”, „którego dnia” albo „jaka będzie data”. Pobierz bieżący czas przed obliczeniem odpowiedzi zamiast zgadywać.",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const now = new Date();
-            const timeZone = "Europe/Warsaw";
-            return {
-              date: new Intl.DateTimeFormat("pl-PL", { timeZone, day: "2-digit", month: "2-digit", year: "numeric" }).format(now),
-              weekday: new Intl.DateTimeFormat("pl-PL", { timeZone, weekday: "long" }).format(now),
-              time: new Intl.DateTimeFormat("pl-PL", { timeZone, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(now),
-              timeZone,
-            };
-          },
-        }),
+        ...workshopTools,
         cennikUslug: tool({
           description:
             "Pobiera potwierdzone informacje Studio Nova o konsultacji online. Wywołaj narzędzie, gdy użytkownik pyta o cenę, koszt, czas trwania lub ofertę tej konsultacji. Nie używaj go do pytań o inne usługi, rabaty ani dostępne terminy.",
@@ -154,7 +217,7 @@ export async function POST(request: Request) {
           toModelOutput: () => ({ type: "text", value: "obraz wygenerowany" }),
         }),
       },
-      stopWhen: isStepCount(5),
+      stopWhen: isStepCount(6),
     });
 
     return result.toUIMessageStreamResponse({
@@ -164,6 +227,9 @@ export async function POST(request: Request) {
           ? {
               retrievedAt: new Date().toISOString(),
               ...(responseModelId ? { modelId: responseModelId } : {}),
+              agentSteps,
+              limitReached,
+              ...(limitReached ? { stepLimit: MAX_AGENT_STEPS, limitFindings } : {}),
             }
           : undefined,
       onError: () => "Wystąpił błąd podczas łączenia z OpenRouter. Sprawdź konfigurację i spróbuj ponownie.",

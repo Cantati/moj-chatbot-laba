@@ -8,6 +8,7 @@ import { getToolOutputErrorMessage } from "../lib/agent-tool-errors";
 type GeneratedImage = { image: string; mediaType: string; modelId: string };
 type StudioNovaPrice = { usluga: string; czasTrwania: string; cena: string };
 type ConsultationPreparation = { charakter: string; wskazowki: string[] };
+type AgentStep = { number: number; tools: string[] };
 type ChatTools = {
   generateImage: { input: { prompt: string }; output: GeneratedImage };
   cennikUslug: { input: { usluga: "konsultacja online" }; output: StudioNovaPrice };
@@ -15,8 +16,23 @@ type ChatTools = {
     input: {};
     output: ConsultationPreparation;
   };
+  pogoda: { input: { city: string; day: string }; output: Record<string, unknown> };
+  waluty: { input: { code: string; amount: number }; output: Record<string, unknown> };
+  swieta: { input: { countryCode: string; year: number }; output: Record<string, unknown> };
+  wikipedia: { input: { title: string }; output: Record<string, unknown> };
+  kalkulator: { input: { operation: "dodaj" | "odejmij" | "pomnóż" | "podziel"; a: number; b: number }; output: Record<string, unknown> };
+  aktualnyCzas: { input: { timeZone?: string }; output: Record<string, unknown> };
+  notatki: { input: { action: "zapisz" | "pokaz"; text?: string }; output: Record<string, unknown> };
+  diagnostyka: { input: {}; output: Record<string, unknown> };
 };
-type ChatMessage = UIMessage<{ retrievedAt?: string; modelId?: string }, UIDataTypes, ChatTools>;
+type ChatMessage = UIMessage<{
+  retrievedAt?: string;
+  modelId?: string;
+  agentSteps?: AgentStep[];
+  limitReached?: boolean;
+  stepLimit?: number;
+  limitFindings?: string[];
+}, UIDataTypes, ChatTools>;
 const chatTransport = new DefaultChatTransport<ChatMessage>({
   api: "/api/agent",
   body: { mode: "chat" },
@@ -28,6 +44,14 @@ function getToolNameFromErrorPart(part: unknown): string | null {
   if (value.state !== "output-error") return null;
   if (value.type === "dynamic-tool") return typeof value.toolName === "string" ? value.toolName : "narzędzie";
   return typeof value.type === "string" && value.type.startsWith("tool-") ? value.type.slice(5) : null;
+}
+
+function getToolLabel(name: string) {
+  if (name === "web_search") return "🔎 wyszukiwanie";
+  if (name === "aktualnyCzas") return "🕒 aktualnyCzas";
+  if (name === "cennikUslug") return "cennikUsług";
+  if (name === "przygotowanieDoUslugi") return "przygotowanieDoUsługi";
+  return name;
 }
 
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024;
@@ -261,6 +285,7 @@ export default function Home() {
         <>
           <header className="chat-header">
             <h1>Mój chatbot</h1>
+            <a className="dashboard-link" href="/dashboard">Asystent podróży</a>
             <button className="logout-button" type="button" onClick={handleLogout}>Wyjdź</button>
           </header>
           {authError && <p className="error" role="alert">{authError}</p>}
@@ -311,27 +336,37 @@ export default function Home() {
                       return part.type.startsWith("tool-") ? [part.type.slice(5)] : [];
                     })
                   : [];
-              if (sources.length > 0) toolNames.push("web_search");
-              const usedTools = Array.from(new Set(toolNames));
+              if (sources.length > 0 && !toolNames.includes("web_search")) toolNames.push("web_search");
+              const agentSteps =
+                message.role === "assistant" && message.metadata?.agentSteps?.length
+                  ? message.metadata.agentSteps
+                  : toolNames.map((name, index) => ({ number: index + 1, tools: [name] }));
+              const limitReached = message.role === "assistant" && message.metadata?.limitReached === true;
+              const limitFindings =
+                message.role === "assistant" ? Array.from(new Set(message.metadata?.limitFindings ?? [])) : [];
 
               return (
                 <article className={`message ${message.role}`} key={message.id}>
                   <strong>{message.role === "user" ? "Ty" : "Chatbot"}</strong>
-                  {usedTools.length > 0 && (
-                    <div className="tool-badges" aria-label="Użyte narzędzia">
-                      {usedTools.map((name) => (
-                        <span className="tool-badge" key={name}>
-                          {name === "web_search"
-                            ? "🔎 wyszukiwanie"
-                            : name === "aktualnyCzas"
-                              ? "🕒 aktualnyCzas"
-                              : name === "cennikUslug"
-                                ? "cennikUsług"
-                                : name === "przygotowanieDoUslugi"
-                                  ? "przygotowanieDoUsługi"
-                              : name}
+                  {agentSteps.length > 0 && (
+                    <div className="agent-steps" aria-label="Kroki agenta">
+                      {agentSteps.map((step, index) => (
+                        <span className="agent-step" key={String(step.number) + "-" + index}>
+                          {step.number}. {step.tools.map(getToolLabel).join(" + ")}
+                          {index < agentSteps.length - 1 && <span aria-hidden="true"> → </span>}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {limitReached && (
+                    <div className="agent-limit" role="status">
+                      <strong>Zatrzymałem się po {message.metadata?.stepLimit ?? 6} krokach</strong>
+                      <p>Udało się ustalić:</p>
+                      {limitFindings.length > 0 ? (
+                        <ul>{limitFindings.map((finding, index) => <li key={index}>{finding}</li>)}</ul>
+                      ) : (
+                        <p>Nie udało się uzyskać dodatkowych danych przed osiągnięciem limitu.</p>
+                      )}
                     </div>
                   )}
                   <div className="message-content">
