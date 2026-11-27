@@ -20,9 +20,10 @@ body {
 
 h1 { margin: 0 0 22px; font-size: 26px; }
 
-.chat-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.chat-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
 .chat-header h1 { margin-bottom: 22px; }
 .dashboard-link { margin: 0 0 22px auto; color: #3157d5; font-size: 14px; }
+.new-conversation-button { min-height: 36px; padding: 0 11px; margin-bottom: 22px; background: #3157d5; font-size: 13px; white-space: nowrap; }
 .auth-form { display: flex; gap: 10px; }
 .logout-button { padding: 9px 14px; margin-bottom: 22px; background: #596579; }
 .mode-switch { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -84,6 +85,38 @@ h1 { margin: 0 0 22px; font-size: 26px; }
 .status { margin: 14px; color: #58647a; font-style: italic; }
 .error { margin: 14px; color: #a32626; }
 
+.history-page { width: min(100% - 32px, 760px); margin: 40px auto; padding: 28px; border: 1px solid #e1e6ef; border-radius: 16px; background: white; box-shadow: 0 12px 36px #1a2b4a12; }
+.history-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.history-header h1 { margin: 0; }
+.history-eyebrow { margin: 0 0 5px; color: #58647a; font-size: 13px; }
+.history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.history-actions a { color: #3157d5; }
+.history-actions button { min-height: 40px; }
+.history-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.history-item { display: grid; gap: 5px; padding: 14px 16px; border: 1px solid #e1e6ef; border-radius: 10px; color: #172033; text-decoration: none; }
+.history-item:hover { border-color: #9aaeea; background: #fbfcfe; }
+.history-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item span, .history-empty { color: #58647a; font-size: 13px; }
+
+.profile-page { width: min(100% - 32px, 760px); margin: 40px auto; padding: 28px; border: 1px solid #e1e6ef; border-radius: 16px; background: white; box-shadow: 0 12px 36px #1a2b4a12; }
+.profile-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.profile-header h1 { margin: 0; }
+.profile-header a { color: #3157d5; }
+.profile-eyebrow { margin: 0 0 5px; color: #58647a; font-size: 13px; }
+.profile-section { margin: 18px 0; padding: 16px; border: 1px solid #e1e6ef; border-radius: 10px; background: #fbfcfe; }
+.profile-section h2 { margin: 0 0 12px; font-size: 17px; }
+.profile-saved-value, .profile-empty { color: #58647a; font-size: 14px; }
+.profile-edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.profile-edit-row input { flex: 1 1 220px; }
+.profile-edit-row button { min-height: 40px; white-space: nowrap; }
+.profile-delete-button { background: #8b3940; }
+.profile-preference-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.profile-preference { display: grid; gap: 6px; }
+.profile-preference > label { font-size: 13px; font-weight: 700; }
+.profile-preference small { color: #58647a; font-size: 12px; }
+.profile-clear-button { min-height: 40px; margin-top: 6px; background: #8b3940; }
+.profile-notice { padding: 9px 12px; border-radius: 8px; background: #edf8f0; color: #27613a; }
+
 .dashboard { width: min(100% - 32px, 1080px); margin: 40px auto; padding: 28px; border: 1px solid #e1e6ef; border-radius: 16px; background: white; box-shadow: 0 12px 36px #1a2b4a12; }
 .dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
 .dashboard-header h1 { margin: 0; }
@@ -107,6 +140,7 @@ h1 { margin: 0 0 22px; font-size: 26px; }
   .chat-header { flex-wrap: wrap; }
   .dashboard-link { margin-left: 0; }
   .dashboard { margin: 16px auto; padding: 18px; }
+  .profile-page, .history-page { margin: 16px auto; padding: 18px; }
   .dashboard-form, .dashboard-cards { grid-template-columns: 1fr; }
   .dashboard-form button { width: 100%; min-height: 44px; }
 }

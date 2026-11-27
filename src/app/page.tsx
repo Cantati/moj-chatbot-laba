@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart, type UIDataTypes, type UIMessage } from "ai";
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { getToolOutputErrorMessage } from "../lib/agent-tool-errors";
 
 type GeneratedImage = { image: string; mediaType: string; modelId: string };
@@ -24,6 +24,15 @@ type ChatTools = {
   aktualnyCzas: { input: { timeZone?: string }; output: Record<string, unknown> };
   notatki: { input: { action: "zapisz" | "pokaz"; text?: string }; output: Record<string, unknown> };
   diagnostyka: { input: {}; output: Record<string, unknown> };
+  zapamietajProfil: {
+    input: {
+      name?: { value: string; evidence: string };
+      city?: { value: string; evidence: string };
+      favoriteFood?: { value: string; evidence: string };
+      responseStyle?: { value: string; evidence: string };
+    };
+    output: Record<string, unknown>;
+  };
 };
 type ChatMessage = UIMessage<{
   retrievedAt?: string;
@@ -33,11 +42,6 @@ type ChatMessage = UIMessage<{
   stepLimit?: number;
   limitFindings?: string[];
 }, UIDataTypes, ChatTools>;
-const chatTransport = new DefaultChatTransport<ChatMessage>({
-  api: "/api/agent",
-  body: { mode: "chat" },
-});
-
 function getToolNameFromErrorPart(part: unknown): string | null {
   if (!part || typeof part !== "object") return null;
   const value = part as { type?: unknown; state?: unknown; toolName?: unknown };
@@ -91,8 +95,17 @@ export default function Home() {
   const [analysisPending, setAnalysisPending] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [analysisError, setAnalysisError] = useState("");
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationReady, setConversationReady] = useState(false);
+  const [conversationError, setConversationError] = useState("");
+  const conversationIdRef = useRef<string | null>(null);
+  const conversationInitializationRef = useRef<Promise<{ id: string; messages: ChatMessage[] }> | null>(null);
   const analysisController = useRef<AbortController | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const chatTransport = useMemo(() => new DefaultChatTransport<ChatMessage>({
+    api: "/api/agent",
+    body: () => ({ mode: "chat", conversationId: conversationIdRef.current }),
+  }), []);
   const { messages, sendMessage, status, error, clearError, setMessages, stop } = useChat<ChatMessage>({
     transport: chatTransport,
   });
@@ -113,6 +126,62 @@ export default function Home() {
       });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    let active = true;
+    setConversationLoading(true);
+    setConversationReady(false);
+    setConversationError("");
+
+    const initializeConversation = async () => {
+        const selectedConversationId = new URLSearchParams(window.location.search).get("conversationId");
+        const conversationUrl = selectedConversationId
+          ? `/api/conversations?conversationId=${encodeURIComponent(selectedConversationId)}`
+          : "/api/conversations";
+        const response = await fetch(conversationUrl, { cache: "no-store" });
+        const data = (await response.json()) as {
+          error?: string;
+          conversation?: { id?: string } | null;
+          messages?: ChatMessage[];
+        };
+        if (!response.ok) throw new Error(data.error ?? "Nie udało się wczytać rozmowy.");
+
+        let id = data.conversation?.id;
+        let restoredMessages = data.messages ?? [];
+        if (!id) {
+          const createResponse = await fetch("/api/conversations", { method: "POST" });
+          const created = (await createResponse.json()) as { error?: string; conversation?: { id?: string }; messages?: ChatMessage[] };
+          if (!createResponse.ok || !created.conversation?.id) {
+            throw new Error(created.error ?? "Nie udało się rozpocząć nowej rozmowy.");
+          }
+          id = created.conversation.id;
+          restoredMessages = created.messages ?? [];
+        }
+
+        return { id, messages: restoredMessages };
+    };
+
+    const initialization = conversationInitializationRef.current ??= initializeConversation();
+    void initialization
+      .then(({ id, messages: restoredMessages }) => {
+        if (!active) return;
+        conversationIdRef.current = id;
+        setMessages(restoredMessages);
+        setConversationReady(true);
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          conversationInitializationRef.current = null;
+          setConversationError(loadError instanceof Error ? loadError.message : "Nie udało się wczytać rozmowy.");
+        }
+      })
+      .finally(() => {
+        if (active) setConversationLoading(false);
+      });
+
+    return () => { active = false; };
+  }, [authenticated, setMessages]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -151,16 +220,47 @@ export default function Home() {
       return;
     }
     setMessages([]);
+    conversationIdRef.current = null;
+    conversationInitializationRef.current = null;
+    setConversationReady(false);
+    setConversationError("");
     clearError();
     setInput("");
     setAuthenticated(false);
     setAuthError("");
   }
 
+  async function handleNewConversation() {
+    if (!authenticated || conversationLoading || isWaiting) return;
+    setConversationLoading(true);
+    setConversationError("");
+    try {
+      const response = await fetch("/api/conversations", { method: "POST" });
+      const data = (await response.json()) as { error?: string; conversation?: { id?: string }; messages?: ChatMessage[] };
+      if (!response.ok || !data.conversation?.id) {
+        throw new Error(data.error ?? "Nie udało się rozpocząć nowej rozmowy.");
+      }
+      conversationIdRef.current = data.conversation.id;
+      const greetingMessages = data.messages ?? [];
+      conversationInitializationRef.current = Promise.resolve({ id: data.conversation.id, messages: greetingMessages });
+      window.history.replaceState(null, "", "/");
+      setMessages(greetingMessages);
+      clearError();
+      setInput("");
+      setConversationReady(true);
+    } catch (newConversationError) {
+      setConversationError(newConversationError instanceof Error
+        ? newConversationError.message
+        : "Nie udało się rozpocząć nowej rozmowy.");
+    } finally {
+      setConversationLoading(false);
+    }
+  }
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
-    if ((!text && !selectedImage) || isWaiting || imageGenerationPending) return;
+    if ((!text && !selectedImage) || !conversationReady || conversationLoading || isWaiting || imageGenerationPending) return;
 
     clearError();
     setImageError("");
@@ -203,7 +303,7 @@ export default function Home() {
 
   async function handleImageGeneration() {
     const prompt = input.trim();
-    if (!prompt || prompt.length > 500 || isWaiting || imageGenerationPending) return;
+    if (!prompt || prompt.length > 500 || !conversationReady || conversationLoading || isWaiting || imageGenerationPending) return;
 
     setImageGenerationPending(true);
     setImageGenerationError("");
@@ -286,9 +386,16 @@ export default function Home() {
           <header className="chat-header">
             <h1>Mój chatbot</h1>
             <a className="dashboard-link" href="/dashboard">Asystent podróży</a>
+            <a className="dashboard-link" href="/history">Historia</a>
+            <a className="dashboard-link" href="/profile">Profil</a>
+            <button className="new-conversation-button" type="button" onClick={() => void handleNewConversation()}
+              disabled={!authenticated || conversationLoading || isWaiting}>
+              Nowa rozmowa
+            </button>
             <button className="logout-button" type="button" onClick={handleLogout}>Wyjdź</button>
           </header>
           {authError && <p className="error" role="alert">{authError}</p>}
+          {conversationError && <p className="error" role="alert">{conversationError}</p>}
           <nav className="mode-switch" aria-label="Tryb pracy">
             <button
               className={mode === "chat" ? "mode-button active" : "mode-button"}
@@ -310,6 +417,7 @@ export default function Home() {
           {mode === "chat" ? (
             <>
           <section className="conversation" aria-label="Rozmowa" aria-live="polite">
+            {conversationLoading && <p className="status" role="status">Wczytuję rozmowę…</p>}
             {messages.map((message, messageIndex) => {
               const previousMessage = messages[messageIndex - 1];
               const answersImage =
@@ -460,7 +568,7 @@ export default function Home() {
               placeholder="Napisz wiadomość…"
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              disabled={isWaiting || imageGenerationPending}
+              disabled={!conversationReady || conversationLoading || isWaiting || imageGenerationPending}
             />
             <input
               ref={imageInputRef}
@@ -475,7 +583,7 @@ export default function Home() {
               type="button"
               className="image-action-button"
               onClick={() => imageInputRef.current?.click()}
-              disabled={isWaiting || imageGenerationPending}
+              disabled={!conversationReady || conversationLoading || isWaiting || imageGenerationPending}
             >
               Dodaj zdjęcie
             </button>
@@ -483,11 +591,11 @@ export default function Home() {
               type="button"
               className="image-action-button"
               onClick={() => void handleImageGeneration()}
-              disabled={!input.trim() || input.trim().length > 500 || isWaiting || imageGenerationPending}
+              disabled={!input.trim() || input.trim().length > 500 || !conversationReady || conversationLoading || isWaiting || imageGenerationPending}
             >
               {imageGenerationPending ? "Generuję…" : "Wygeneruj obraz"}
             </button>
-            <button type="submit" disabled={(!input.trim() && !selectedImage) || isWaiting || imageGenerationPending}>
+            <button type="submit" disabled={(!input.trim() && !selectedImage) || !conversationReady || conversationLoading || isWaiting || imageGenerationPending}>
               {isWaiting ? "Czekaj…" : "Wyślij"}
             </button>
           </form>

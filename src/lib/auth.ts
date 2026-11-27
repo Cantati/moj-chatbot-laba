@@ -66,6 +66,14 @@ export function validSessionFromCookieHeader(cookieHeader: string | null, now = 
   }
 }
 
+export function sessionRequiredResponse() {
+  return Response.json({ error: "Zaloguj się ponownie, aby kontynuować." }, { status: 401 });
+}
+
+export function requireActiveSession(cookieHeader: string | null) {
+  return validSessionFromCookieHeader(cookieHeader) ? null : sessionRequiredResponse();
+}
+
 export function sessionCookie(token: string, maxAge = SESSION_MAX_AGE) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;

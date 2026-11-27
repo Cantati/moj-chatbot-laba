@@ -7,6 +7,8 @@ import { validateChatRequestMessages } from "../../../lib/agent-chat-validation"
 import { cennikUslugInputSchema, pobierzCennikUslug } from "../../../lib/studio-nova-cennik";
 import { przygotowanieDoUslugiTool } from "../../../lib/studio-nova-przygotowanie";
 import { createWorkshopTools } from "../../../lib/workshop-tools";
+import { createConversationRepository, getSupabaseClient } from "../../../lib/supabase";
+import { completeProfileInputFromLatestMessage, profileInstructions, rememberUserProfileInputSchema, validateExplicitProfileFacts } from "../../../lib/user-profile";
 import {
   STUDIO_NOVA_ANALYSIS_INSTRUCTIONS,
   STUDIO_NOVA_CHAT_INSTRUCTIONS,
@@ -34,6 +36,7 @@ function summarizeToolResult(toolName: string, output: unknown) {
     aktualnyCzas: ["date", "weekday", "time", "timeZone"],
     cennikUslug: ["usluga", "czasTrwania", "cena"],
     diagnostyka: ["model", "stepLimit"],
+    zapamietajProfil: ["confirmation"],
   };
   const details = (fieldsByTool[toolName] ?? [])
     .filter((key) => ["string", "number", "boolean"].includes(typeof result[key]))
@@ -142,10 +145,29 @@ export async function POST(request: Request) {
     }
   }
 
-  const chatBody = body as { messages?: unknown };
+  const chatBody = body as { messages?: unknown; conversationId?: unknown };
   const validatedMessages = await validateChatRequestMessages(chatBody.messages);
   if (!validatedMessages.success) {
     return Response.json({ error: validatedMessages.error }, { status: validatedMessages.status });
+  }
+
+  const conversationId = z.string().trim().min(1).max(128).safeParse(chatBody.conversationId);
+  if (!conversationId.success) {
+    return Response.json({ error: "Rozpocznij rozmowę ponownie przed wysłaniem wiadomości." }, { status: 400 });
+  }
+  const userMessage = validatedMessages.messages.at(-1);
+  if (!userMessage || userMessage.role !== "user") {
+    return Response.json({ error: "Nie znaleziono nowej wiadomości użytkownika." }, { status: 400 });
+  }
+
+  let conversationRepository: ReturnType<typeof createConversationRepository>;
+  let userProfile: Awaited<ReturnType<ReturnType<typeof createConversationRepository>["getUserProfile"]>>;
+  try {
+    conversationRepository = createConversationRepository(getSupabaseClient());
+    userProfile = await conversationRepository.getUserProfile();
+    await conversationRepository.saveMessage(conversationId.data, "user", userMessage);
+  } catch {
+    return Response.json({ error: "Nie udało się wczytać pamięci profilu ani przygotować rozmowy." }, { status: 503 });
   }
 
   try {
@@ -167,6 +189,7 @@ export async function POST(request: Request) {
       model: openrouter(modelId),
       instructions: [
         STUDIO_NOVA_CHAT_INSTRUCTIONS,
+        profileInstructions(userProfile),
         "Przy zadaniu złożonym pracuj krok po kroku: użyj narzędzia, przeczytaj jego wynik i dopiero wtedy zdecyduj o następnym kroku. Nie zgaduj danych, które możesz sprawdzić.",
         "Jeśli użytkownik wyraźnie prosi o stworzenie, narysowanie lub wygenerowanie obrazu, użyj narzędzia generateImage.",
       ].join("\n\n"),
@@ -190,6 +213,48 @@ export async function POST(request: Request) {
       tools: {
         web_search: openrouter.tools.webSearch({ maxResults: 3, engine: "native" }),
         ...workshopTools,
+        zapamietajProfil: tool({
+          description: "Zapisuje do trwałego profilu jedynie imię, miasto, ulubione jedzenie lub preferowany styl odpowiedzi, które użytkownik podał wprost. Gdy jedna wiadomość zawiera kilka takich faktów, przekaż je wszystkie w jednym wywołaniu narzędzia. Dla każdej wartości podaj krótki, dokładny cytat z wiadomości użytkownika w polu evidence. Nie zapisuj planów, przypuszczeń ani wniosków; nigdy nie zapisuj haseł, kluczy API, sekretów ani innych danych wrażliwych. Nowe wartości uzupełniają profil i nie usuwają pozostałych preferencji. Po udanym zapisie nie wywołuj tego narzędzia ponownie w tym zadaniu — krótko potwierdź użytkownikowi, co zapamiętałeś, i zakończ odpowiedź.",
+          inputSchema: rememberUserProfileInputSchema,
+          execute: async (input) => {
+            const userTexts = validatedMessages.messages
+              .filter((message) => message.role === "user")
+              .flatMap((message) => message.parts.flatMap((part) =>
+                part.type === "text" ? [part.text] : [],
+              ));
+            const latestUserText = userTexts.at(-1) ?? "";
+            const completedInput = completeProfileInputFromLatestMessage(input, latestUserText, userTexts);
+            const checked = validateExplicitProfileFacts(completedInput, userTexts);
+            const labels: Record<string, string> = {
+              name: "imię",
+              city: "miasto",
+              favoriteFood: "ulubione jedzenie",
+              responseStyle: "preferowany styl odpowiedzi",
+            };
+            const savedLabels = checked.savedFields.map((field) => labels[field] ?? "informację");
+            const rejectedLabels = checked.rejectedFields.map((field) => labels[field] ?? "informację");
+            if (checked.savedFields.length === 0) {
+              return {
+                saved: false,
+                savedFields: [],
+                rejectedFields: checked.rejectedFields,
+                confirmation: rejectedLabels.length > 0
+                  ? `Nie zapisałem: ${rejectedLabels.join(", ")}.`
+                  : "Nie zapisałem informacji, których nie mogłem potwierdzić jako podanych wprost i bezpiecznych.",
+              };
+            }
+            await conversationRepository.saveUserProfile(checked.facts);
+            return {
+              saved: true,
+              savedFields: checked.savedFields,
+              rejectedFields: checked.rejectedFields,
+              confirmation: [
+                `Zapamiętałem: ${savedLabels.join(", ")}.`,
+                ...(rejectedLabels.length > 0 ? [`Nie zapisałem: ${rejectedLabels.join(", ")}.`] : []),
+              ].join(" "),
+            };
+          },
+        }),
         cennikUslug: tool({
           description:
             "Pobiera potwierdzone informacje Studio Nova o konsultacji online. Wywołaj narzędzie, gdy użytkownik pyta o cenę, koszt, czas trwania lub ofertę tej konsultacji. Nie używaj go do pytań o inne usługi, rabaty ani dostępne terminy.",
@@ -222,6 +287,14 @@ export async function POST(request: Request) {
 
     return result.toUIMessageStreamResponse({
       sendSources: true,
+      originalMessages: validatedMessages.messages,
+      onEnd: async ({ messages, isAborted, outcome }) => {
+        if (isAborted || outcome.status !== "completed") return;
+        const assistantMessage = [...messages].reverse().find((message) => message.role === "assistant");
+        if (assistantMessage) {
+          await conversationRepository.saveMessage(conversationId.data, "assistant", assistantMessage);
+        }
+      },
       messageMetadata: ({ part }) =>
         part.type === "finish"
           ? {
