@@ -388,6 +388,7 @@ export default function Home() {
             <a className="dashboard-link" href="/dashboard">Asystent podróży</a>
             <a className="dashboard-link" href="/history">Historia</a>
             <a className="dashboard-link" href="/profile">Profil</a>
+            <a className="dashboard-link" href="/upload">Baza wiedzy</a>
             <button className="new-conversation-button" type="button" onClick={() => void handleNewConversation()}
               disabled={!authenticated || conversationLoading || isWaiting}>
               Nowa rozmowa

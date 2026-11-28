@@ -1,4 +1,4 @@
-import { convertToModelMessages, generateImage, generateText, isStepCount, Output, streamText, tool } from "ai";
+import { convertToModelMessages, embed, generateImage, generateText, isStepCount, Output, streamText, tool } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { z } from "zod";
 import { validSessionFromCookieHeader } from "../../../lib/auth";
@@ -7,6 +7,7 @@ import { validateChatRequestMessages } from "../../../lib/agent-chat-validation"
 import { cennikUslugInputSchema, pobierzCennikUslug } from "../../../lib/studio-nova-cennik";
 import { przygotowanieDoUslugiTool } from "../../../lib/studio-nova-przygotowanie";
 import { createWorkshopTools } from "../../../lib/workshop-tools";
+import { createKnowledgeSearchService, KNOWLEDGE_SEARCH_INSTRUCTIONS, reportKnowledgeSearchDiagnostic } from "../../../lib/knowledge-search";
 import { createConversationRepository, getSupabaseClient } from "../../../lib/supabase";
 import { completeProfileInputFromLatestMessage, profileInstructions, rememberUserProfileInputSchema, validateExplicitProfileFacts } from "../../../lib/user-profile";
 import {
@@ -185,10 +186,36 @@ export async function POST(request: Request) {
     const agentSteps: Array<{ number: number; tools: string[] }> = [];
     const limitFindings: string[] = [];
     let limitReached = false;
+    const embeddingModelId = process.env.OPENROUTER_EMBEDDING_MODEL?.trim();
+    const searchKnowledge = tool({
+      description: "Używaj przy każdym pytaniu o firmę, ofertę, ceny, zasady i regulamin.",
+      inputSchema: z.object({ question: z.string().trim().min(1).max(12000) }),
+      execute: async ({ question }) => {
+        if (!embeddingModelId) {
+          reportKnowledgeSearchDiagnostic("konfiguracja", false, { code: "MISSING_EMBEDDING_MODEL" });
+          return { error: "Wyszukiwanie bazy wiedzy nie jest skonfigurowane." };
+        }
+        let supabase: ReturnType<typeof getSupabaseClient>;
+        try {
+          supabase = getSupabaseClient();
+        } catch (error) {
+          reportKnowledgeSearchDiagnostic("konfiguracja", false, error);
+          return { error: "Wyszukiwanie bazy wiedzy nie jest skonfigurowane." };
+        }
+        reportKnowledgeSearchDiagnostic("konfiguracja", true);
+        const service = createKnowledgeSearchService(supabase, async (value) => {
+          const result = await embed({ model: openrouter.textEmbeddingModel(embeddingModelId), value });
+          return result.embedding;
+        });
+        return await service(question);
+      },
+    });
+
     const result = streamText({
       model: openrouter(modelId),
       instructions: [
         STUDIO_NOVA_CHAT_INSTRUCTIONS,
+        KNOWLEDGE_SEARCH_INSTRUCTIONS,
         profileInstructions(userProfile),
         "Przy zadaniu złożonym pracuj krok po kroku: użyj narzędzia, przeczytaj jego wynik i dopiero wtedy zdecyduj o następnym kroku. Nie zgaduj danych, które możesz sprawdzić.",
         "Jeśli użytkownik wyraźnie prosi o stworzenie, narysowanie lub wygenerowanie obrazu, użyj narzędzia generateImage.",
@@ -212,6 +239,7 @@ export async function POST(request: Request) {
       },
       tools: {
         web_search: openrouter.tools.webSearch({ maxResults: 3, engine: "native" }),
+        searchKnowledge,
         ...workshopTools,
         zapamietajProfil: tool({
           description: "Zapisuje do trwałego profilu jedynie imię, miasto, ulubione jedzenie lub preferowany styl odpowiedzi, które użytkownik podał wprost. Gdy jedna wiadomość zawiera kilka takich faktów, przekaż je wszystkie w jednym wywołaniu narzędzia. Dla każdej wartości podaj krótki, dokładny cytat z wiadomości użytkownika w polu evidence. Nie zapisuj planów, przypuszczeń ani wniosków; nigdy nie zapisuj haseł, kluczy API, sekretów ani innych danych wrażliwych. Nowe wartości uzupełniają profil i nie usuwają pozostałych preferencji. Po udanym zapisie nie wywołuj tego narzędzia ponownie w tym zadaniu — krótko potwierdź użytkownikowi, co zapamiętałeś, i zakończ odpowiedź.",

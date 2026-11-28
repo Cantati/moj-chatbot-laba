@@ -18,7 +18,7 @@ type ConversationDatabase = Pick<SupabaseClient, "from">;
 type ConversationSummary = { id: string };
 const MAX_INT8_ID = "9223372036854775807";
 
-function normalizeInt8Id(value: unknown): string {
+export function normalizeInt8Id(value: unknown): string {
   let id: string;
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
     id = value.toString();
